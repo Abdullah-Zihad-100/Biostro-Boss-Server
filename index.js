@@ -1,5 +1,7 @@
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const stripe = require("stripe")(process.env.SECRET_STRIPE);
+const stripe = require("stripe")(
+  "sk_test_51QF8eQAUiLguY8EZInU3VxFKhvU2rRdDIlUJMJMOdZXfL0RsnA3vnMgEY4mtnNBVt0UeoQjsuzni9hcDsTg7Wkbb00xmsn6ZQg"
+);
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
@@ -62,6 +64,30 @@ async function run() {
       next();
     };
 
+    // stats
+    app.get("/admin-stats", async (req, res) => {
+      const users = await usersCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentsCollection.estimatedDocumentCount();
+
+      // this is note the bast way
+
+      const result = await paymentsCollection
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+              totalRevenue: {
+                $sum: "$price",
+              },
+            },
+          },
+        ])
+        .toArray();
+      const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+      res.send({ users, menuItems, orders, revenue });
+    });
 
     // payment intent
 
@@ -78,21 +104,74 @@ async function run() {
       });
     });
 
+    // using aggerete pipeline
 
+const { ObjectId } = require("mongodb");
+
+app.get("/order-stats", async (req, res) => {
+  try {
+    const result = await paymentsCollection
+      .aggregate([
+        {
+          $unwind: "$menuItemIds",
+        },
+        {
+          $addFields: {
+            menuItemObjectId: { $toObjectId: "$menuItemIds" },
+          },
+        },
+        {
+          $lookup: {
+            from: "menu",
+            localField: "menuItemObjectId",
+            foreignField: "_id",
+            as: "menuItems",
+          },
+        },
+        {
+          $unwind: "$menuItems",
+        },
+        {
+          $group: {
+            _id: "$menuItems.category",
+            quantity: { $sum: 1 },
+            revenue: { $sum: "$menuItems.price" },
+          },
+        },
+        {
+          $project:{
+            _id:0,
+            category:'$_id',
+            quantity:"$quantity",
+            revenue:'$revenue'
+
+          }
+        },
+      ])
+      .toArray();
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching order stats:", error);
+    res.status(500).send("Internal Server Error");
+  }
+});
 
     // payment related api
 
-    app.post('/payments',async(req,res)=>{
-      const payment=req.body
-      const paymentResult=await paymentsCollection.insertOne(payment)
+    app.post("/payments", async (req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentsCollection.insertOne(payment);
       // carefully delete each item form card
-      console.log('payment info',payment);
-      const query={_id:{
-        $in:payment.cartIds.map(id => new ObjectId(id))
-      }}
-      const deleteResult=await cartsCollection.deleteMany(query)
-      res.send({paymentResult,deleteResult})
-    })
+      console.log("payment info", payment);
+      const query = {
+        _id: {
+          $in: payment.cartIds.map((id) => new ObjectId(id)),
+        },
+      };
+      const deleteResult = await cartsCollection.deleteMany(query);
+      res.send({ paymentResult, deleteResult });
+    });
 
     app.get("/payments", verifyToken, async (req, res) => {
       const email = req.query.email;
@@ -103,8 +182,6 @@ async function run() {
       const result = await paymentsCollection.find({ email: email }).toArray();
       res.send(result);
     });
-
-
 
     // JWT route
     app.post("/jwt", async (req, res) => {
@@ -170,15 +247,26 @@ async function run() {
       res.send(result);
     });
 
-    app.post("/menu",verifyToken,verifyAdmin, async (req, res) => {
+    app.post("/menu", verifyToken, verifyAdmin, async (req, res) => {
       const menu = req.body;
       const result = await menuCollection.insertOne(menu);
       res.send(result);
     });
 
     // Reviews routes
-    app.get("/reviews", async (req, res) => {
-      const result = await reviewsCollection.find().toArray();
+
+
+    app.post("/reviews",async (req,res)=>{
+      const review=req.body;
+      const result=await reviewsCollection.insertOne(review);
+      res.send(result)
+    })
+
+
+    app.get("/reviews",async (req, res) => {
+      const email=req.query.email;
+      const query=email ?  {email}:{}
+      const result = await reviewsCollection.find(query).toArray();
       res.send(result);
     });
 
@@ -196,7 +284,6 @@ async function run() {
       res.send(result);
     });
 
-
     // carts delete
     app.delete("/carts/:id", async (req, res) => {
       const id = req.params.id;
@@ -205,38 +292,36 @@ async function run() {
       res.send(result);
     });
 
+    app.delete("/menu/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.deleteOne(query);
+      res.send(result);
+    });
 
+    app.get("/menu/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.findOne(query);
+      res.send(result);
+    });
 
-    app.delete("/menu/:id" ,async(req,res)=>{
-      const id=req.params.id;
-      const query={_id: new ObjectId(id)}
-      const result=await menuCollection.deleteOne(query);
-      res.send(result)
-    })
-
-    app.get("/menu/:id",async(req,res)=>{
-      const id=req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await menuCollection.findOne(query);
-        res.send(result);
-    })
-
-    app.patch("/menu/:id",async(req,res)=>{
-      const id=req.params.id;
-      const item=req.body;
-        const filter = { _id: new ObjectId(id) };
-        const updatedDocs={
-          $set:{
-            name:item.name,
-            recipe:item.recipe,
-            price:item.price,
-            category:item.category,
-            image:item.image,
-          }
-        }
-        const result = await menuCollection.updateOne(filter,updatedDocs);
-        res.send(result);
-    })
+    app.patch("/menu/:id", async (req, res) => {
+      const id = req.params.id;
+      const item = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDocs = {
+        $set: {
+          name: item.name,
+          recipe: item.recipe,
+          price: item.price,
+          category: item.category,
+          image: item.image,
+        },
+      };
+      const result = await menuCollection.updateOne(filter, updatedDocs);
+      res.send(result);
+    });
 
     // Ping to confirm MongoDB connection
     await client.db("admin").command({ ping: 1 });
